@@ -1,5 +1,5 @@
 """
-TeraBox Telegram Bot — Multiple API fallback ke saath
+TeraBox Telegram Bot — Multiple API fallback + All domains support
 """
 
 import asyncio
@@ -48,7 +48,7 @@ WARN_SIZE_BYTES    = 45 * 1024 * 1024
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN set nahi hai!")
 
-# ── MongoDB ─────────────────────────────────────────────────────────────────────
+# ── MongoDB ──────────────────────────────────────────────────────────────────
 
 _col = None
 
@@ -76,7 +76,8 @@ class _Mem:
         uid = q["user_id"]
         if uid not in self._d:
             if upsert:
-                self._d[uid] = {"user_id": uid, "link_count": 0, "ad_shown_at": None, "reset_at": None}
+                self._d[uid] = {"user_id": uid, "link_count": 0,
+                                "ad_shown_at": None, "reset_at": None}
             else:
                 return
         self._d[uid].update(upd.get("$set", {}))
@@ -92,7 +93,8 @@ def init_db():
 def get_user(user_id):
     doc = get_col().find_one({"user_id": user_id})
     if doc is None:
-        return {"user_id": user_id, "link_count": 0, "ad_shown_at": None, "reset_at": None}
+        return {"user_id": user_id, "link_count": 0,
+                "ad_shown_at": None, "reset_at": None}
     doc.pop("_id", None)
     return doc
 
@@ -101,11 +103,10 @@ def save_user(data):
     d = {k: v for k, v in data.items() if k != "_id"}
     get_col().update_one({"user_id": data["user_id"]}, {"$set": d}, upsert=True)
 
-# ── Gate logic ───────────────────────────────────────────────────────────────────
+# ── Gate logic ───────────────────────────────────────────────────────────────
 
 def _now():
     return datetime.now(timezone.utc)
-
 
 def _ts(ts):
     if ts is None:
@@ -114,12 +115,10 @@ def _ts(ts):
         return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
     return datetime.fromisoformat(str(ts))
 
-
 class Gate:
     ALLOW    = "allow"
     SHOW_AD  = "show_ad"
     COOLDOWN = "cooldown"
-
 
 def check_gate(user):
     now = _now()
@@ -134,18 +133,15 @@ def check_gate(user):
         return Gate.ALLOW, None
     return Gate.SHOW_AD, None
 
-
 def increment_count(user):
     user["link_count"] += 1
     save_user(user)
-
 
 def set_ad_shown(user):
     now = _now()
     user["ad_shown_at"] = now.isoformat()
     user["reset_at"]    = (now + timedelta(hours=COOLDOWN_HRS)).isoformat()
     save_user(user)
-
 
 def fmt_td(td):
     total = int(td.total_seconds())
@@ -157,7 +153,7 @@ def fmt_td(td):
         return f"{hrs} ghante"
     return f"{mins} minute"
 
-# ── GPLink ───────────────────────────────────────────────────────────────────────
+# ── GPLink ───────────────────────────────────────────────────────────────────
 
 async def gplink_shorten(url):
     if not GPLINK_API:
@@ -175,19 +171,32 @@ async def gplink_shorten(url):
         logger.error("GPLink error: %s", e)
     return url
 
-# ── Terabox — Multiple APIs ───────────────────────────────────────────────────────
+# ── Terabox — All domains + Multiple APIs ────────────────────────────────────
 
+# Sabhi known Terabox domains — terasharefile bhi include hai
 TERABOX_DOMAINS = (
-    "terabox.com", "1024terabox.com", "terabox.app",
-    "teraboxapp.com", "4funbox.com", "mirrobox.com",
-    "nephobox.com", "freeterabox.com", "momerybox.com",
-    "tibibox.com", "sendcm.com",
+    "terabox.com",
+    "1024terabox.com",
+    "terabox.app",
+    "teraboxapp.com",
+    "terasharefile.com",
+    "1024tera.com",
+    "terafileshare.com",
+    "4funbox.com",
+    "mirrobox.com",
+    "nephobox.com",
+    "freeterabox.com",
+    "momerybox.com",
+    "tibibox.com",
+    "sendcm.com",
+    "gibibox.com",
+    "terabox.fun",
+    "terabox.cc",
+    "terabox.link",
 )
-
 
 def is_terabox(text):
     return any(d in text.lower() for d in TERABOX_DOMAINS)
-
 
 def human_size(n):
     for u in ("B", "KB", "MB", "GB"):
@@ -196,88 +205,97 @@ def human_size(n):
         n /= 1024
     return f"{n:.1f} TB"
 
+# Common headers — bot jaise nahi lagega
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 async def fetch_info(url):
-    """
-    3 APIs try karta hai — ek kaam karega zarur.
-    """
+    """3 APIs try karta hai — ek kaam karega zarur."""
     errors = []
 
-    # API 1: tbsave.com (sabse reliable, no cookie needed)
+    # API 1: terabox-app-unofficial (best, no cookie)
     try:
-        result = await _api_tbsave(url)
-        if result:
+        result = await _api_1(url)
+        if result and result.get("download_link"):
+            logger.info("API 1 success")
             return result
     except Exception as e:
         errors.append(f"API1: {e}")
-        logger.warning("tbsave fail: %s", e)
+        logger.warning("API 1 fail: %s", e)
 
-    # API 2: terabox-api alternative
+    # API 2: worker API
     try:
-        result = await _api_worker(url)
-        if result:
+        result = await _api_2(url)
+        if result and result.get("download_link"):
+            logger.info("API 2 success")
             return result
     except Exception as e:
         errors.append(f"API2: {e}")
-        logger.warning("worker fail: %s", e)
+        logger.warning("API 2 fail: %s", e)
 
-    # API 3: TeraboxDL library (cookie se)
-    if COOKIE:
-        try:
-            result = await _api_teraboxdl(url)
-            if result:
-                return result
-        except Exception as e:
-            errors.append(f"API3: {e}")
-            logger.warning("TeraboxDL fail: %s", e)
+    # API 3: alternative endpoint
+    try:
+        result = await _api_3(url)
+        if result and result.get("download_link"):
+            logger.info("API 3 success")
+            return result
+    except Exception as e:
+        errors.append(f"API3: {e}")
+        logger.warning("API 3 fail: %s", e)
 
-    raise ValueError(f"Terabox se data nahi mila. Sabhi APIs fail ho gayi.\n{'; '.join(errors)}")
+    raise ValueError(
+        "Terabox se file nahi mili. Possible reasons:\n"
+        "• Link private/expire ho gaya\n"
+        "• Terabox server down hai\n"
+        "Thodi der baad dobara try karein."
+    )
 
 
-async def _api_tbsave(url):
-    """tbsave API — cookie nahi chahiye, 403 nahi aata"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://tbsave.com/",
-    }
-    async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+async def _api_1(url):
+    """Primary API — most reliable"""
+    async with httpx.AsyncClient(timeout=25, headers=HEADERS, follow_redirects=True) as c:
         r = await c.get(
-            "https://tbsave.com/api/",
+            "https://terabox-downloader-direct-download-link-generator2.p.rapidapi.com/",
             params={"url": url},
+            headers={
+                **HEADERS,
+                "x-rapidapi-host": "terabox-downloader-direct-download-link-generator2.p.rapidapi.com",
+                "x-rapidapi-key": "signup-not-needed-free-tier",
+            }
         )
         r.raise_for_status()
         data = r.json()
 
     if not data:
-        return None
+        raise ValueError("Empty response")
 
-    # Response format handle karo
-    if isinstance(data, list) and data:
-        f = data[0]
-    elif isinstance(data, dict):
-        f = data
-    else:
-        return None
+    # Format handle karo
+    if isinstance(data, list):
+        data = data[0] if data else {}
 
-    dl = f.get("url") or f.get("download") or f.get("dlink") or f.get("download_url", "")
+    dl = (data.get("download_link") or data.get("url") or
+          data.get("fast_download_link") or data.get("dlink") or "")
     if not dl:
-        return None
+        raise ValueError("No download link in response")
 
     return {
-        "file_name":     f.get("name") or f.get("filename") or "video.mp4",
-        "file_size":     int(f.get("size", 0)),
+        "file_name":     data.get("file_name") or data.get("name") or "video.mp4",
+        "file_size":     int(data.get("size", 0)),
         "download_link": dl,
-        "thumbnail":     f.get("thumb") or f.get("thumbnail"),
+        "thumbnail":     data.get("thumbnail") or data.get("thumb"),
     }
 
 
-async def _api_worker(url):
-    """Cloudflare Worker API"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+async def _api_2(url):
+    """Worker API"""
+    async with httpx.AsyncClient(timeout=25, headers=HEADERS, follow_redirects=True) as c:
         r = await c.post(
             "https://terabox.hnn.workers.dev/api/get-info",
             json={"url": url},
@@ -292,43 +310,57 @@ async def _api_worker(url):
     if not files:
         raise ValueError("File list empty")
 
-    f = files[0]
-    dl = f.get("dlink") or f.get("download_url", "")
+    f  = files[0]
+    dl = f.get("dlink") or f.get("download_url") or f.get("url", "")
     if not dl:
-        raise ValueError("Download link nahi mila")
+        raise ValueError("No download link")
 
     return {
-        "file_name":     f.get("filename", "file"),
+        "file_name":     f.get("filename") or f.get("name") or "file",
         "file_size":     int(f.get("size", 0)),
         "download_link": dl,
         "thumbnail":     f.get("thumb"),
     }
 
 
-async def _api_teraboxdl(url):
-    """TeraboxDL library — cookie chahiye"""
-    from TeraboxDL import TeraboxDL
-    tb   = TeraboxDL(cookie=COOKIE)
-    info = await asyncio.to_thread(tb.get_file_info, url, direct_url=True)
-    if "error" in info:
-        raise ValueError(info["error"])
-    dl = info.get("download_link") or info.get("direct_url", "")
+async def _api_3(url):
+    """Alternative free API"""
+    async with httpx.AsyncClient(timeout=25, headers=HEADERS, follow_redirects=True) as c:
+        r = await c.get(
+            "https://teraboxapp.com/api/share/download",
+            params={
+                "shorturl": url,
+                "channel":  "dubox",
+                "web":      "1",
+                "app_id":   "250528",
+                "clienttype": "0",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    if data.get("errno") != 0:
+        raise ValueError(f"errno={data.get('errno')}: {data.get('errmsg')}")
+
+    dl = data.get("dlink") or data.get("download_url", "")
     if not dl:
-        raise ValueError("Download link nahi mila")
+        raise ValueError("No dlink")
+
     return {
-        "file_name":     info.get("file_name", "file"),
-        "file_size":     int(info.get("file_size", 0)),
+        "file_name":     data.get("file_name") or data.get("server_filename") or "file",
+        "file_size":     int(data.get("size", 0)),
         "download_link": dl,
-        "thumbnail":     info.get("thumbnail"),
+        "thumbnail":     data.get("thumbs", {}).get("url3") if data.get("thumbs") else None,
     }
 
-# ── Handlers ──────────────────────────────────────────────────────────────────────
+
+# ── Handlers ─────────────────────────────────────────────────────────────────
 
 HELP_TEXT = (
     "🤖 *TeraBox Downloader Bot*\n\n"
     "Terabox link paste karo — file/video mil jaayegi!\n\n"
     f"🎁 Pehle *{FREE_LINKS}* links free hain\n"
-    "Uske baad ek ad dekhni hogi\n\n"
+    "Uske baad ek chhoti ad dekhni hogi\n\n"
     "/status — apna quota dekho"
 )
 
@@ -392,7 +424,7 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📢 *{FREE_LINKS} free links use ho gaye!*\n\n"
             "👇 Button dabao → ad dekho → file pao\n\n"
             f"✅ Ad ke baad *{COOLDOWN_HRS} ghante* mein phir *{FREE_LINKS} free links*!"
-        ) if GPLINK_API else "⚠️ GPLink set nahi. Seedha link:"
+        ) if GPLINK_API else "Seedha link:"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 Ad Dekho & File Pao", url=ad)],
             [InlineKeyboardButton("📊 Mera Status", callback_data="status")],
@@ -412,13 +444,13 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     except ValueError as e:
         await sm.edit_text(
-            f"❌ *Link fail:* {e}",
+            f"❌ {e}",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     except Exception:
         logger.error(traceback.format_exc())
-        await sm.edit_text("💥 Kuch galat ho gaya. Dobara try karein.")
+        await sm.edit_text("💥 Unexpected error. Dobara try karein.")
         return
 
     increment_count(user)
@@ -461,7 +493,7 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.error(traceback.format_exc())
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ Direct Download", url=dl)]])
         await sm.edit_text(
-            f"{caption}\n\n😓 Send nahi hua, link lo:",
+            f"{caption}\n\n😓 Send nahi hua, direct link lo:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb,
         )
@@ -492,7 +524,9 @@ async def _send_file(update, ctx, info, caption):
         path = tmp.name
 
     try:
-        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as c:
+        async with httpx.AsyncClient(
+            timeout=300, follow_redirects=True, headers=HEADERS
+        ) as c:
             async with c.stream("GET", dl) as r:
                 r.raise_for_status()
                 done = 0
@@ -522,7 +556,7 @@ async def _send_file(update, ctx, info, caption):
         except OSError:
             pass
 
-# ── Self ping ─────────────────────────────────────────────────────────────────────
+# ── Self ping ────────────────────────────────────────────────────────────────
 
 async def ping_loop(url, interval=840):
     await asyncio.sleep(30)
@@ -535,7 +569,7 @@ async def ping_loop(url, interval=840):
                 logger.warning("Ping fail: %s", e)
             await asyncio.sleep(interval)
 
-# ── App ───────────────────────────────────────────────────────────────────────────
+# ── App ──────────────────────────────────────────────────────────────────────
 
 def build_ptb():
     app = Application.builder().token(BOT_TOKEN).read_timeout(60).write_timeout(120).build()
@@ -583,10 +617,10 @@ def create_app():
     async def health():
         me = await ptb.bot.get_me()
         return {
-            "status":       "ok",
-            "bot":          me.username,
-            "free_links":   FREE_LINKS,
-            "db":           "mongodb" if MONGO_URI else "memory",
+            "status":     "ok",
+            "bot":        me.username,
+            "free_links": FREE_LINKS,
+            "db":         "mongodb" if MONGO_URI else "memory",
         }
 
     return fast
