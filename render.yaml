@@ -1,0 +1,34 @@
+# render.yaml — Render Blueprint file
+# Yeh file Render ko batati hai ki service kaise deploy karein
+# Isko apne GitHub repo ki root mein rakhein
+
+services:
+  - type: web
+    name: terabox-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    plan: free                    # Free tier!
+    envVars:
+      - key: PORT
+        value: 10000              # Render ka default port
+      - key: BOT_TOKEN
+        sync: false               # Dashboard mein manually set karein
+      - key: WEBHOOK_URL
+        sync: false               # Render aapko URL dega — wahi yahan daalna hai
+      - key: GPLINK_API
+        sync: false
+      - key: COOKIE
+        sync: false
+      - key: FREE_LINKS
+        value: "3"
+      - key: COOLDOWN_HRS
+        value: "7"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: terabox-bot-db    # neeche wali DB se automatically link hoga
+          property: connectionString
+
+databases:
+  - name: terabox-bot-db
+    plan: free                    # Free PostgreSQL (90 din)
