@@ -1,20 +1,20 @@
 """
-TeraBox Telegram Bot — Render.com Free Tier ke liye Optimized
-=============================================================
+TeraBox Telegram Bot — MongoDB Atlas ke saath
+=============================================
 Features:
   • Terabox link → file/video seedha Telegram mein
   • GPLink ad system: N free links → ad → phir N free links
-  • PostgreSQL database (Render free DB ke saath kaam karta hai)
+  • MongoDB Atlas database (hamesha free!)
   • Self-ping: Render ke 15-min sleep se bachne ke liye
   • Webhook mode (production) + Polling mode (local test)
 
 Environment variables (.env / Render dashboard mein):
-  BOT_TOKEN      — BotFather se mila token         [ZARURI]
-  DATABASE_URL   — PostgreSQL connection string     [ZARURI on Render]
-  WEBHOOK_URL    — aapka public HTTPS domain        [ZARURI on Render]
-  GPLINK_API     — GPLink developer API key         [ZARURI for monetization]
+  BOT_TOKEN      — BotFather se mila token              [ZARURI]
+  MONGO_URI      — MongoDB Atlas connection string       [ZARURI]
+  WEBHOOK_URL    — aapka public HTTPS domain             [ZARURI on Render]
+  GPLINK_API     — GPLink developer API key              [ZARURI for ads]
   PORT           — server port (default 10000)
-  COOKIE         — TeraBox account cookie           [optional]
+  COOKIE         — TeraBox account cookie                [optional]
   FREE_LINKS     — free links before ad (default 3)
   COOLDOWN_HRS   — hours after ad (default 7)
 """
@@ -59,7 +59,7 @@ COOKIE       = os.getenv("COOKIE", "")
 GPLINK_API   = os.getenv("GPLINK_API", "")
 FREE_LINKS   = int(os.getenv("FREE_LINKS", "3"))
 COOLDOWN_HRS = int(os.getenv("COOLDOWN_HRS", "7"))
-DATABASE_URL = os.getenv("DATABASE_URL", "")  # PostgreSQL URL (Render se)
+MONGO_URI    = os.getenv("MONGO_URI", "")
 
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
 WARN_SIZE_BYTES    = 45 * 1024 * 1024
@@ -68,98 +68,89 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env var set nahi hai!")
 
 
-# ─── Database (PostgreSQL ya SQLite fallback) ─────────────────────────────────
+# ─── MongoDB Database ─────────────────────────────────────────────────────────
 
-def _get_db_conn():
-    """
-    PostgreSQL (production/Render) ya SQLite (local dev) connection return karo.
-    DATABASE_URL set hai → psycopg2 use karo
-    nahi hai → sqlite3 use karo
-    """
-    if DATABASE_URL:
-        import psycopg2
-        import psycopg2.extras
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-        conn.autocommit = False
-        return conn, "pg"
+_mongo_collection = None
+
+def get_collection():
+    """MongoDB collection return karo (lazy init, cached)."""
+    global _mongo_collection
+    if _mongo_collection is not None:
+        return _mongo_collection
+
+    if MONGO_URI:
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client["terabox_bot"]
+        _mongo_collection = db["users"]
+        logger.info("MongoDB Atlas connected ✅")
     else:
-        import sqlite3
-        conn = sqlite3.connect("users.db")
-        conn.row_factory = sqlite3.Row
-        return conn, "sqlite"
+        # Local dev ke liye: mongomock (ya sirf dict in-memory)
+        logger.warning("MONGO_URI nahi mila — in-memory storage use ho rahi hai (restart pe data jayega)")
+        _mongo_collection = _InMemoryStore()
+
+    return _mongo_collection
+
+
+class _InMemoryStore:
+    """Local testing ke liye: MongoDB jaisi API, data RAM mein."""
+    def __init__(self):
+        self._data = {}
+
+    def find_one(self, query):
+        uid = query.get("user_id")
+        return self._data.get(uid)
+
+    def update_one(self, query, update, upsert=False):
+        uid = query.get("user_id")
+        if uid not in self._data:
+            if upsert:
+                self._data[uid] = {"user_id": uid, "link_count": 0,
+                                   "ad_shown_at": None, "reset_at": None}
+            else:
+                return
+        set_data = update.get("$set", {})
+        self._data[uid].update(set_data)
 
 
 def init_db() -> None:
-    """Table banao agar nahi hai."""
-    conn, db_type = _get_db_conn()
-    try:
-        cur = conn.cursor()
-        if db_type == "pg":
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id      BIGINT PRIMARY KEY,
-                    link_count   INTEGER NOT NULL DEFAULT 0,
-                    ad_shown_at  TIMESTAMPTZ,
-                    reset_at     TIMESTAMPTZ
-                )
-            """)
-        else:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id      INTEGER PRIMARY KEY,
-                    link_count   INTEGER NOT NULL DEFAULT 0,
-                    ad_shown_at  TEXT,
-                    reset_at     TEXT
-                )
-            """)
-        conn.commit()
-        logger.info("Database ready (%s)", db_type)
-    finally:
-        conn.close()
+    """DB connection test karo startup pe."""
+    col = get_collection()
+    if MONGO_URI:
+        try:
+            # Ping karo
+            col.find_one({"user_id": 0})
+            logger.info("MongoDB ready ✅")
+        except Exception as e:
+            logger.error("MongoDB connection fail: %s", e)
+            raise
 
 
 def get_user(user_id: int) -> dict:
-    conn, db_type = _get_db_conn()
-    try:
-        cur = conn.cursor()
-        if db_type == "pg":
-            import psycopg2.extras
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM users WHERE user_id = %s" if db_type == "pg"
-                    else "SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        if row is None:
-            return {"user_id": user_id, "link_count": 0, "ad_shown_at": None, "reset_at": None}
-        return dict(row)
-    finally:
-        conn.close()
+    """User ka record fetch karo, nahi hai toh default return karo."""
+    col = get_collection()
+    doc = col.find_one({"user_id": user_id})
+    if doc is None:
+        return {
+            "user_id":     user_id,
+            "link_count":  0,
+            "ad_shown_at": None,
+            "reset_at":    None,
+        }
+    # MongoDB _id field hata do
+    doc.pop("_id", None)
+    return doc
 
 
 def save_user(data: dict) -> None:
-    conn, db_type = _get_db_conn()
-    try:
-        cur = conn.cursor()
-        if db_type == "pg":
-            cur.execute("""
-                INSERT INTO users (user_id, link_count, ad_shown_at, reset_at)
-                VALUES (%(user_id)s, %(link_count)s, %(ad_shown_at)s, %(reset_at)s)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    link_count  = EXCLUDED.link_count,
-                    ad_shown_at = EXCLUDED.ad_shown_at,
-                    reset_at    = EXCLUDED.reset_at
-            """, data)
-        else:
-            cur.execute("""
-                INSERT INTO users (user_id, link_count, ad_shown_at, reset_at)
-                VALUES (:user_id, :link_count, :ad_shown_at, :reset_at)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    link_count  = excluded.link_count,
-                    ad_shown_at = excluded.ad_shown_at,
-                    reset_at    = excluded.reset_at
-            """, data)
-        conn.commit()
-    finally:
-        conn.close()
+    """User record save/update karo."""
+    col = get_collection()
+    save_data = {k: v for k, v in data.items() if k != "_id"}
+    col.update_one(
+        {"user_id": data["user_id"]},
+        {"$set": save_data},
+        upsert=True,
+    )
 
 
 # ─── User gate logic ──────────────────────────────────────────────────────────
@@ -330,9 +321,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     gate, _ = check_gate(user)
     left = max(0, FREE_LINKS - user["link_count"]) if gate == Gate.ALLOW else FREE_LINKS
     await update.message.reply_text(
-        f"Aao *{name}*\\! 👋\n\n{HELP_TEXT}\n\n"
-        f"📊 Abhi *{left}* free link\\(s\\) baaki hain\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"Aao *{name}*! 👋\n\n{HELP_TEXT}\n\n"
+        f"📊 Abhi *{left}* free link(s) baaki hain.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
@@ -345,7 +336,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     gate, remaining = check_gate(user)
 
     if gate == Gate.COOLDOWN:
-        t = format_td(remaining)
+        t   = format_td(remaining)
         txt = (
             f"⏳ *Cooldown chal raha hai*\n\n"
             f"`{t}` baad phir se {FREE_LINKS} free links milenge.\n"
@@ -422,13 +413,22 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         info = await fetch_terabox_info(text)
     except httpx.TimeoutException:
-        await status_msg.edit_text("⏰ *Timeout!* Terabox slow hai. Dobara try karein.", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text(
+            "⏰ *Timeout!* Terabox slow hai. Dobara try karein.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
     except httpx.HTTPStatusError as e:
-        await status_msg.edit_text(f"🌐 *HTTP {e.response.status_code}* — server problem. Baad mein try karein.", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text(
+            f"🌐 *HTTP {e.response.status_code}* — server problem. Baad mein try karein.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
     except ValueError as e:
-        await status_msg.edit_text(f"❌ *Link fail:* {e}\n\n_Expire/private ho sakta hai._", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text(
+            f"❌ *Link fail:* {e}\n\n_Expire/private ho sakta hai._",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
     except Exception:
         logger.error(traceback.format_exc())
@@ -451,9 +451,11 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         caption += f"\n\n⚠️ Agli baar ad dekhna hoga"
 
-    # 50 MB se badi
+    # 50 MB se badi file
     if fsize and fsize > TELEGRAM_MAX_BYTES:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]
+        ])
         await status_msg.edit_text(
             f"{caption}\n\n⚠️ *File 50 MB se badi hai* — Telegram seedha nahi bhej sakta.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
@@ -461,7 +463,8 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await status_msg.edit_text(
-        f"{caption}\n\n📤 {'Badi file, thoda wait...' if fsize and fsize > WARN_SIZE_BYTES else 'File aa rahi hai...'}",
+        f"{caption}\n\n📤 "
+        f"{'Badi file, thoda wait...' if fsize and fsize > WARN_SIZE_BYTES else 'File aa rahi hai...'}",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -469,14 +472,18 @@ async def handle_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _download_and_send(update, ctx, info, caption)
         await status_msg.delete()
     except _FileTooLarge:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]
+        ])
         await status_msg.edit_text(
             f"{caption}\n\n⚠️ Telegram ne reject kiya (size limit).",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
         )
     except Exception:
         logger.error(traceback.format_exc())
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬇️ Direct Download", url=dl_link)]
+        ])
         await status_msg.edit_text(
             f"{caption}\n\n😓 Send nahi hua, link yahan hai:",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
@@ -520,9 +527,14 @@ async def _download_and_send(update, ctx, info, caption):
                         f.write(chunk)
 
         with open(tmp_path, "rb") as f:
-            kw = dict(chat_id=cid, filename=fname, caption=caption,
-                      parse_mode=ParseMode.MARKDOWN,
-                      read_timeout=120, write_timeout=120)
+            kw = dict(
+                chat_id=cid,
+                filename=fname,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                read_timeout=120,
+                write_timeout=120,
+            )
             if is_video:
                 await ctx.bot.send_video(video=f, supports_streaming=True, **kw)
             else:
@@ -537,11 +549,8 @@ async def _download_and_send(update, ctx, info, caption):
 # ─── Self-ping (Render free tier ke liye) ────────────────────────────────────
 
 async def self_ping_loop(url: str, interval: int = 840) -> None:
-    """
-    Render free tier 15 min baad service sulate hai.
-    Har 14 minute mein /health endpoint ping karte rehenge.
-    """
-    await asyncio.sleep(30)  # startup ke baad thoda wait
+    """Har 14 minute mein ping — Render ko jagte rakhta hai."""
+    await asyncio.sleep(30)
     async with httpx.AsyncClient(timeout=10) as client:
         while True:
             try:
@@ -586,7 +595,6 @@ def create_app() -> FastAPI:
                 drop_pending_updates=True,
             )
             logger.info("Webhook set: %s", wh)
-            # Self-ping start karo
             asyncio.create_task(self_ping_loop(WEBHOOK_URL.rstrip("/")))
         else:
             logger.warning("WEBHOOK_URL nahi — polling chalao")
@@ -608,11 +616,11 @@ def create_app() -> FastAPI:
     async def health():
         me = await ptb.bot.get_me()
         return {
-            "status": "ok",
-            "bot": me.username,
-            "free_links": FREE_LINKS,
+            "status":       "ok",
+            "bot":          me.username,
+            "free_links":   FREE_LINKS,
             "cooldown_hrs": COOLDOWN_HRS,
-            "db": "postgres" if DATABASE_URL else "sqlite",
+            "db":           "mongodb" if MONGO_URI else "in-memory",
         }
 
     return fast
@@ -639,4 +647,3 @@ if __name__ == "__main__":
         run_polling()
     else:
         run_webhook()
-
