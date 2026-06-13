@@ -1,0 +1,18 @@
+# Telegram bot (async, v20+)
+python-telegram-bot[webhooks]==21.9
+
+# Web server + framework
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+
+# HTTP client
+httpx==0.28.1
+
+# Terabox link resolver
+terabox-downloader==1.8
+
+# .env file support
+python-dotenv==1.1.0
+
+# PostgreSQL driver (Render ke liye)
+psycopg2-binary==2.9.10
