@@ -1,5 +1,5 @@
 """
-TeraBox Telegram Bot — RapidAPI ke saath (100% working)
+TeraBox Telegram Bot — 3 Working RapidAPI Endpoints
 """
 
 import asyncio
@@ -193,152 +193,179 @@ def human_size(n):
         n /= 1024
     return f"{n:.1f} TB"
 
-# ── Terabox APIs ─────────────────────────────────────────────────────────────
+# ── Terabox APIs — 3 working endpoints ───────────────────────────────────────
 
 async def fetch_info(url):
-    """RapidAPI pehle try karo, phir fallbacks."""
     errors = []
 
-    # API 1: RapidAPI (sabse reliable — Render pe block nahi hota)
+    # ── API 1: terabox-downloader-hyper (jo aapne subscribe kiya!) ──
     if RAPIDAPI_KEY:
         try:
-            result = await _rapidapi(url)
-            if result and result.get("download_link"):
-                logger.info("RapidAPI success ✅")
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.get(
+                    "https://terabox-downloader-hyper.p.rapidapi.com/api",
+                    params={
+                        "key": "RapidAPI-1903-fast",
+                        "url": url,
+                    },
+                    headers={
+                        "x-rapidapi-key":  RAPIDAPI_KEY,
+                        "x-rapidapi-host": "terabox-downloader-hyper.p.rapidapi.com",
+                        "Content-Type":    "application/json",
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                logger.info("API1 raw: %s", str(data)[:400])
+
+            result = _parse_rapid(data)
+            if result:
+                logger.info("API 1 (hyper) success ✅")
                 return result
         except Exception as e:
-            errors.append(f"RapidAPI: {e}")
-            logger.warning("RapidAPI fail: %s", e)
+            errors.append(f"API1: {e}")
+            logger.warning("API 1 fail: %s", e)
 
-    # API 2: Worker fallback
+    # ── API 2: terabox-downloader1 (saifuddinsktc) ──
+    if RAPIDAPI_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.get(
+                    "https://terabox-downloader1.p.rapidapi.com/media",
+                    params={"url": url},
+                    headers={
+                        "x-rapidapi-key":  RAPIDAPI_KEY,
+                        "x-rapidapi-host": "terabox-downloader1.p.rapidapi.com",
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                logger.info("API2 raw: %s", str(data)[:400])
+
+            result = _parse_rapid(data)
+            if result:
+                logger.info("API 2 success ✅")
+                return result
+        except Exception as e:
+            errors.append(f"API2: {e}")
+            logger.warning("API 2 fail: %s", e)
+
+    # ── API 3: direct-download-link-generator (POST) ──
+    if RAPIDAPI_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    "https://terabox-downloader-direct-download-link-generator.p.rapidapi.com/fetch",
+                    json={"url": url},
+                    headers={
+                        "x-rapidapi-key":  RAPIDAPI_KEY,
+                        "x-rapidapi-host": "terabox-downloader-direct-download-link-generator.p.rapidapi.com",
+                        "Content-Type":    "application/json",
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                logger.info("API3 raw: %s", str(data)[:400])
+
+            result = _parse_rapid(data)
+            if result:
+                logger.info("API 3 success ✅")
+                return result
+        except Exception as e:
+            errors.append(f"API3: {e}")
+            logger.warning("API 3 fail: %s", e)
+
+    # ── API 4: Worker fallback (no key needed) ──
     try:
-        result = await _worker_api(url)
-        if result and result.get("download_link"):
-            logger.info("Worker API success ✅")
-            return result
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.post(
+                "https://terabox.hnn.workers.dev/api/get-info",
+                json={"url": url},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            r.raise_for_status()
+            data = r.json()
+
+        if data.get("ok"):
+            files = data.get("list", [])
+            if files:
+                f  = files[0]
+                dl = f.get("dlink") or f.get("download_url") or f.get("url", "")
+                if dl:
+                    logger.info("Worker API success ✅")
+                    return {
+                        "file_name":     f.get("filename") or "file",
+                        "file_size":     int(f.get("size", 0)),
+                        "download_link": dl,
+                        "thumbnail":     f.get("thumb"),
+                    }
+        errors.append(f"Worker: {data.get('message')}")
     except Exception as e:
         errors.append(f"Worker: {e}")
-        logger.warning("Worker API fail: %s", e)
-
-    # API 3: TeraboxDL (cookie chahiye)
-    if COOKIE:
-        try:
-            result = await _teraboxdl(url)
-            if result and result.get("download_link"):
-                logger.info("TeraboxDL success ✅")
-                return result
-        except Exception as e:
-            errors.append(f"TeraboxDL: {e}")
-            logger.warning("TeraboxDL fail: %s", e)
+        logger.warning("Worker fail: %s", e)
 
     raise ValueError(
-        "Terabox se file nahi mili.\n"
-        "• Link private/expire ho gaya ho sakta hai\n"
-        "• Ya Terabox server issue hai\n"
+        "❌ Terabox se file nahi mili.\n\n"
+        "Possible reasons:\n"
+        "• Link private/expire ho gaya\n"
+        "• Terabox server down hai\n\n"
         "Thodi der baad dobara try karein."
     )
 
 
-async def _rapidapi(url):
-    """RapidAPI Terabox Downloader — Render pe kaam karta hai"""
-    headers = {
-        "x-rapidapi-key":  RAPIDAPI_KEY,
-        "x-rapidapi-host": "terabox-downloader1.p.rapidapi.com",
-    }
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.get(
-            "https://terabox-downloader1.p.rapidapi.com/media",
-            params={"url": url},
-            headers=headers,
-        )
-        r.raise_for_status()
-        data = r.json()
+def _parse_rapid(data):
+    """RapidAPI response se download link nikalo — har format handle karo."""
+    if not data:
+        return None
 
-    logger.info("RapidAPI raw: %s", str(data)[:300])
-
-    # Response format handle karo
+    # List format
     if isinstance(data, list):
-        item = data[0] if data else {}
-    elif isinstance(data, dict):
-        item = data
-    else:
-        raise ValueError(f"Unexpected format: {type(data)}")
+        data = data[0] if data else {}
+
+    # Nested 'response' key
+    if isinstance(data, dict) and "response" in data:
+        inner = data["response"]
+        if isinstance(inner, list) and inner:
+            data = inner[0]
+        elif isinstance(inner, dict):
+            data = inner
+
+    if not isinstance(data, dict):
+        return None
 
     # Download link dhundo
     dl = (
-        item.get("url") or
-        item.get("download_url") or
-        item.get("dlink") or
-        item.get("download_link") or
-        item.get("fast_download_link") or
-        item.get("resolutions", {}).get("Fast Download") or
+        data.get("url") or
+        data.get("download_url") or
+        data.get("dlink") or
+        data.get("download_link") or
+        data.get("fast_download_link") or
+        data.get("hd_mp4_url") or
+        data.get("mp4_url") or
         ""
     )
 
-    # Nested resolutions check
-    if not dl and item.get("resolutions"):
-        res = item["resolutions"]
-        dl = res.get("HD Video") or res.get("SD Video") or res.get("Fast Download") or ""
-
+    # resolutions ke andar dhundo
     if not dl:
-        raise ValueError(f"Download link nahi mila. Response: {str(item)[:200]}")
+        res = data.get("resolutions") or data.get("resolution") or {}
+        if isinstance(res, dict):
+            dl = (
+                res.get("Fast Download") or
+                res.get("HD Video") or
+                res.get("SD Video") or
+                res.get("Auto") or
+                next(iter(res.values()), "")
+            )
+
+    if not dl or not str(dl).startswith("http"):
+        return None
 
     return {
-        "file_name":     item.get("title") or item.get("file_name") or item.get("name") or "video.mp4",
-        "file_size":     int(item.get("size", 0)),
+        "file_name":     (data.get("title") or data.get("file_name") or
+                         data.get("name") or data.get("filename") or "video.mp4"),
+        "file_size":     int(data.get("size", 0)),
         "download_link": dl,
-        "thumbnail":     item.get("thumbnail") or item.get("thumb"),
-    }
-
-
-async def _worker_api(url):
-    """Cloudflare Worker fallback"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-    async with httpx.AsyncClient(timeout=25, headers=headers) as c:
-        r = await c.post(
-            "https://terabox.hnn.workers.dev/api/get-info",
-            json={"url": url},
-        )
-        r.raise_for_status()
-        data = r.json()
-
-    if not data.get("ok"):
-        raise ValueError(data.get("message") or "ok=false")
-
-    files = data.get("list", [])
-    if not files:
-        raise ValueError("File list empty")
-
-    f  = files[0]
-    dl = f.get("dlink") or f.get("download_url") or f.get("url", "")
-    if not dl:
-        raise ValueError("No download link")
-
-    return {
-        "file_name":     f.get("filename") or "file",
-        "file_size":     int(f.get("size", 0)),
-        "download_link": dl,
-        "thumbnail":     f.get("thumb"),
-    }
-
-
-async def _teraboxdl(url):
-    """TeraboxDL library fallback (cookie chahiye)"""
-    from TeraboxDL import TeraboxDL
-    tb   = TeraboxDL(cookie=COOKIE)
-    info = await asyncio.to_thread(tb.get_file_info, url, direct_url=True)
-    if "error" in info:
-        raise ValueError(info["error"])
-    dl = info.get("download_link") or info.get("direct_url", "")
-    if not dl:
-        raise ValueError("No download link")
-    return {
-        "file_name":     info.get("file_name", "file"),
-        "file_size":     int(info.get("file_size", 0)),
-        "download_link": dl,
-        "thumbnail":     info.get("thumbnail"),
+        "thumbnail":     data.get("thumbnail") or data.get("thumb") or data.get("cover"),
     }
 
 # ── Bot Handlers ─────────────────────────────────────────────────────────────
@@ -603,11 +630,11 @@ def create_app():
     async def health():
         me = await ptb.bot.get_me()
         return {
-            "status":      "ok",
-            "bot":         me.username,
-            "free_links":  FREE_LINKS,
-            "rapidapi":    "set" if RAPIDAPI_KEY else "missing",
-            "db":          "mongodb" if MONGO_URI else "memory",
+            "status":     "ok",
+            "bot":        me.username,
+            "free_links": FREE_LINKS,
+            "rapidapi":   "set" if RAPIDAPI_KEY else "MISSING",
+            "db":         "mongodb" if MONGO_URI else "memory",
         }
 
     return fast
